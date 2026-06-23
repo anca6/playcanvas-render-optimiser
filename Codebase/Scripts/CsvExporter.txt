@@ -1,0 +1,107 @@
+import { Script } from 'playcanvas';
+
+export class CsvExporter extends Script {
+    static scriptName = 'csvExporter';
+
+    /**
+     * logs the final CSV to the browser console when all tests finish
+     * @attribute
+     * @type {boolean}
+     */
+    logWhenDone = true;
+
+    /**
+     * downloads the CSV file when all tests finish
+     * @attribute
+     * @type {boolean}
+     */
+    downloadWhenDone = true;
+
+    /**
+     * name of the downloaded CSV file
+     * @attribute
+     * @type {string}
+     */
+    fileName = 'baseline_results.csv';
+
+    initialize() {
+        this.headers = [];
+        this.rows = [];
+    }
+
+    startNew(headers) {
+        this.headers = headers || [];
+        this.rows = [];
+    }
+
+    addRow(row) {
+        if (!this.headers.length) {
+            this.headers = Object.keys(row);
+        }
+
+        this.rows.push(row);
+        console.log('[CSV EXPORTER] Added row:', row);
+    }
+
+    buildCsv() {
+        const lines = [];
+
+        lines.push(this.headers.map(value => this.escapeCsv(value)).join(','));
+
+        for (const row of this.rows) {
+            const line = this.headers
+                .map(header => this.escapeCsv(row[header]))
+                .join(',');
+
+            lines.push(line);
+        }
+
+        return lines.join('\n');
+    }
+
+    finish() {
+        const csv = this.buildCsv();
+
+        if (this.logWhenDone) {
+            console.log('\n===== BENCHMARK CSV START =====\n');
+            console.log(csv);
+            console.log('\n===== BENCHMARK CSV END =====\n');
+        }
+
+        if (this.downloadWhenDone) {
+            this.downloadCsv(csv, this.fileName);
+        }
+
+        return csv;
+    }
+
+    escapeCsv(value) {
+        if (value === undefined || value === null) {
+            return '';
+        }
+
+        const text = String(value);
+
+        if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+            return `"${text.replace(/"/g, '""')}"`;
+        }
+
+        return text;
+    }
+
+    downloadCsv(csv, fileName) {
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        link.style.display = 'none';
+
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        URL.revokeObjectURL(url);
+    }
+}

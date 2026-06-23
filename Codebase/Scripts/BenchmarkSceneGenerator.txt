@@ -1,0 +1,248 @@
+import { Script, Asset, Entity, Vec3 } from 'playcanvas';
+
+/** @enum {number} */
+const E_SPAWN_MODE = {
+    PRIMITIVE: 0,
+    ASSET: 1
+};
+
+export class BenchmarkSceneGenerator extends Script {
+    static scriptName = 'benchmarkSceneGenerator';
+
+    /**
+     * Parent entity for the generated objects.
+     * @attribute
+     * @type {Entity}
+     */
+    spawnParent;
+
+    /**
+     * Material used by all generated objects in the baseline.
+     * @attribute
+     * @type {Asset}
+     */
+    materialAsset;
+
+    /**
+     * Render asset for imported mesh tests.
+     * @attribute
+     * @type {Asset}
+     */
+    renderAsset;
+
+    /**
+     * @attribute
+     * @type {E_SPAWN_MODE}
+     */
+    spawnMode = E_SPAWN_MODE.PRIMITIVE;
+
+    /**
+     * The primitive shape used when spawnMode is PRIMITIVE.
+     * Box, sphere, capsule, cylinder, cone.
+     * @attribute
+     * @type {string}
+     */
+    primitiveType = 'box';
+
+    /**
+     * Distance between generated objects.
+     * @attribute
+     * @type {number}
+     */
+    spacing = 2.5;
+
+    /**
+     * Y position of generated objects.
+     * @attribute
+     * @type {number}
+     */
+    yPosition = 0;
+
+    /**
+     * Scale applied to generated objects.
+     * @attribute
+     * @type {Vec3}
+     */
+    objectScale = new Vec3(1, 1, 1);
+
+    /**
+     * Enables shadow casting on generated render components.
+     * False for baseline testing (?)
+     * @attribute
+     * @type {boolean}
+     */
+    castShadows = false;
+
+    /**
+     * Enables shadow receiving on generated render components.
+     * False for baseline testing (?)
+     * @attribute
+     * @type {boolean}
+     */
+    receiveShadows = false;
+
+    initialize() {
+        this.spawnedObjects = [];
+
+        if (!this.spawnParent) {
+            this.spawnParent = new Entity('SpawnedObjects');
+            this.app.root.addChild(this.spawnParent);
+        }
+    }
+
+    generate(objectCount) {
+        this.clear();
+
+        const count = Math.max(0, Math.floor(objectCount));
+        const columns = Math.ceil(Math.sqrt(count));
+        const rows = Math.ceil(count / columns);
+
+        const totalWidth = (columns - 1) * this.spacing;
+        const totalDepth = (rows - 1) * this.spacing;
+
+        for (let i = 0; i < count; i++) {
+            const column = i % columns;
+            const row = Math.floor(i / columns);
+
+            const x = column * this.spacing - totalWidth * 0.5;
+            const z = row * this.spacing - totalDepth * 0.5;
+
+            const entity = this.createBenchmarkObject(i);
+            entity.setLocalPosition(x, this.yPosition, z);
+            entity.setLocalScale(this.objectScale);
+
+            this.spawnParent.addChild(entity);
+            this.spawnedObjects.push(entity);
+        }
+
+        const meshInstanceCount = this.countActiveMeshInstances();
+
+        console.log(`[SCENE GENERATOR] Spawned ${count} objects.`);
+        console.log(`[SCENE GENERATOR] Active render mesh instances: ${meshInstanceCount}.`);
+
+        return {
+            objectCount: count,
+            meshInstanceCount: meshInstanceCount
+        };
+    }
+
+    clear() {
+        for (const entity of this.spawnedObjects) {
+            if (entity && !entity.destroyed) {
+                entity.destroy();
+            }
+        }
+
+        this.spawnedObjects.length = 0;
+
+        if (this.spawnParent) {
+            const children = [...this.spawnParent.children];
+
+            for (const child of children) {
+                child.destroy();
+            }
+        }
+    }
+
+    createBenchmarkObject(index) {
+        const entity = new Entity(`BenchmarkObject_${index}`);
+
+        if (this.spawnMode === E_SPAWN_MODE.ASSET) {
+            this.addRenderAssetComponent(entity);
+        } else {
+            this.addPrimitiveRenderComponent(entity);
+        }
+
+        entity.tags.add('benchmark-object');
+
+        return entity;
+    }
+
+    addPrimitiveRenderComponent(entity) {
+        entity.addComponent('render', {
+            type: this.primitiveType
+        });
+
+        entity.render.castShadows = this.castShadows;
+        entity.render.receiveShadows = this.receiveShadows;
+
+        this.applyMaterial(entity);
+    }
+
+    addRenderAssetComponent(entity) {
+        if (!this.renderAsset) {
+            console.warn('[SCENE GENERATOR] No renderAsset assigned, fallback to box.');
+
+            entity.addComponent('render', {
+                type: 'box'
+            });
+
+            this.applyMaterial(entity);
+            return;
+        }
+
+        entity.addComponent('render', {
+            type: 'asset'
+        });
+
+        entity.render.asset = this.renderAsset;
+        entity.render.castShadows = this.castShadows;
+        entity.render.receiveShadows = this.receiveShadows;
+
+        this.applyMaterial(entity);
+    }
+
+    applyMaterial(entity) {
+        if (!this.materialAsset || !this.materialAsset.resource || !entity.render) {
+            return;
+        }
+
+        const material = this.materialAsset.resource;
+
+        if (entity.render.type === 'asset') {
+            // For render assets, render.material is ignored.
+            // Assigning the mesh instance materials directly works as an override.
+            const meshInstances = entity.render.meshInstances || [];
+
+            for (const meshInstance of meshInstances) {
+                meshInstance.material = material;
+            }
+
+            // Also set materialAssets when possible so it's visible on the component.
+            const slotCount = Math.max(1, meshInstances.length);
+            entity.render.materialAssets = new Array(slotCount).fill(this.materialAsset);
+        } else {
+            entity.render.material = material;
+        }
+    }
+
+    countActiveMeshInstances() {
+        let count = 0;
+
+        this.traverse(this.spawnParent, entity => {
+            if (!entity.enabled || !entity.render || !entity.render.enabled) {
+                return;
+            }
+
+            const meshInstances = entity.render.meshInstances;
+
+            if (meshInstances && meshInstances.length) {
+                count += meshInstances.length;
+            }
+        });
+
+        return count;
+    }
+
+    traverse(entity, callback) {
+        if (!entity) {
+            return;
+        }
+
+        callback(entity);
+
+        for (let i = 0; i < entity.children.length; i++) {
+            this.traverse(entity.children[i], callback);
+        }
+    }
+}

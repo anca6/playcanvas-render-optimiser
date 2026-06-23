@@ -1,0 +1,387 @@
+import { Script, KEY_B } from 'playcanvas';
+
+const BENCHMARK_HEADERS = [
+    'testName',
+    'mode',
+    'objectCount',
+    'meshVariantCount',
+    'materialVariantCount',
+    'repetition',
+    'warmupSeconds',
+    'measureSeconds',
+    'avgFps',
+    'minFps',
+    'maxFps',
+    'avgFrameTimeMs',
+    'minFrameTimeMs',
+    'maxFrameTimeMs',
+    'runtimeDrawCallsAvg',
+    'runtimeDrawCallsMin',
+    'runtimeDrawCallsMax',
+    'objectRenderMeshInstances',
+    'browser',
+    'resolution',
+    'deviceNotes',
+    'notes'
+];
+
+export class BaselineBenchmarkRunner extends Script {
+    static scriptName = 'baselineBenchmarkRunner';
+
+    /**
+     * @attribute
+     * @type {string}
+     */
+    testName = 'baseline_cube';
+
+    /**
+     * @attribute
+     * @type {string}
+     */
+    objectCounts = '100,250,500,1000';
+
+    /**
+     * @attribute
+     * @type {number}
+     */
+    repetitions = 3;
+
+    /**
+     * Warm-up time before measurement starts.
+     * @attribute
+     * @type {number}
+     */
+    warmupSeconds = 3;
+
+    /**
+     * Measurement duration per run.
+     * @attribute
+     * @type {number}
+     */
+    measureSeconds = 10;
+
+    /**
+     * If enabled, benchmark starts automatically after startDelaySeconds.
+     * @attribute
+     * @type {boolean}
+     */
+    autoStart = false;
+
+    /**
+     * Delay before auto-starting the benchmark.
+     * @attribute
+     * @type {number}
+     */
+    startDelaySeconds = 1;
+
+    /**
+     * Browser used for the test.
+     * @attribute
+     * @type {string}
+     */
+    browser = 'Chrome';
+
+    /**
+     * Resolution used for the test.
+     * @attribute
+     * @type {string}
+     */
+    resolution = '1920x1080';
+
+    initialize() {
+        this.generator = null;
+        this.csvExporter = null;
+
+        this.queue = [];
+        this.currentRun = null;
+
+        this.phase = 'idle';
+        this.timer = 0;
+        this.autoStartTimer = 0;
+        this.hasAutoStarted = false;
+
+        this.fpsSamples = [];
+        this.frameTimeSamples = [];
+        this.runtimeDrawCallSamples = [];
+
+        console.log('[BASELINE BENCHMARK] Press B to start benchmark.');
+    }
+
+    postInitialize() {
+        this.generator = this.entity.script.benchmarkSceneGenerator;
+        this.csvExporter = this.entity.script.csvExporter;
+
+        if (!this.generator) {
+            console.error('[BASELINE BENCHMARK] Missing BenchmarkSceneGenerator on the same entity.');
+        }
+
+        if (!this.csvExporter) {
+            console.error('[BASELINE BENCHMARK] Missing CsvExporter on the same entity.');
+        }
+    }
+
+    update(dt) {
+        if (this.autoStart && !this.hasAutoStarted) {
+            this.autoStartTimer += dt;
+
+            if (this.autoStartTimer >= this.startDelaySeconds) {
+                this.hasAutoStarted = true;
+                this.startBenchmark();
+            }
+        }
+
+        if (this.app.keyboard && this.app.keyboard.wasPressed(KEY_B)) {
+            this.startBenchmark();
+        }
+
+        if (this.phase === 'idle' || this.phase === 'done') {
+            return;
+        }
+
+        if (this.phase === 'warmup') {
+            this.timer += dt;
+
+            if (this.timer >= this.warmupSeconds) {
+                this.startMeasurement();
+            }
+
+            return;
+        }
+
+        if (this.phase === 'measure') {
+            this.timer += dt;
+            this.collectSample(dt);
+
+            if (this.timer >= this.measureSeconds) {
+                this.finishMeasurement();
+            }
+        }
+    }
+
+    startBenchmark() {
+        if (!this.generator || !this.csvExporter) {
+            console.error('[BASELINE BENCHMARK] Cannot start. Missing generator or CSV exporter.');
+            return;
+        }
+
+        this.queue = this.buildQueue();
+        this.csvExporter.startNew(BENCHMARK_HEADERS);
+
+        console.log('[BASELINE BENCHMARK] Starting benchmark.');
+        console.log('[BASELINE BENCHMARK] Test queue:', this.queue);
+
+        this.startNextRun();
+    }
+
+    buildQueue() {
+        const counts = this.objectCounts
+            .split(',')
+            .map(value => Number(value.trim()))
+            .filter(value => Number.isFinite(value) && value > 0);
+
+        const queue = [];
+
+        for (const objectCount of counts) {
+            for (let repetition = 1; repetition <= this.repetitions; repetition++) {
+                queue.push({
+                    objectCount,
+                    repetition
+                });
+            }
+        }
+
+        return queue;
+    }
+
+    startNextRun() {
+        if (!this.queue.length) {
+            this.finishBenchmark();
+            return;
+        }
+
+        this.currentRun = this.queue.shift();
+
+        console.log(
+            `[BASELINE BENCHMARK] Preparing ${this.currentRun.objectCount} objects, repetition ${this.currentRun.repetition}.`
+        );
+
+        this.generator.generate(this.currentRun.objectCount);
+
+        this.phase = 'warmup';
+        this.timer = 0;
+
+        this.fpsSamples.length = 0;
+        this.frameTimeSamples.length = 0;
+        this.runtimeDrawCallSamples.length = 0;
+    }
+
+    startMeasurement() {
+        console.log(
+            `[BASELINE BENCHMARK] Measuring ${this.currentRun.objectCount} objects, repetition ${this.currentRun.repetition}.`
+        );
+
+        this.phase = 'measure';
+        this.timer = 0;
+
+        this.fpsSamples.length = 0;
+        this.frameTimeSamples.length = 0;
+        this.runtimeDrawCallSamples.length = 0;
+    }
+
+    collectSample(dt) {
+        if (dt <= 0) {
+            return;
+        }
+
+        const frameTimeMs = dt * 1000;
+        const fps = 1 / dt;
+        const runtimeDrawCalls = this.readRuntimeDrawCalls();
+
+        this.fpsSamples.push(fps);
+        this.frameTimeSamples.push(frameTimeMs);
+
+        if (runtimeDrawCalls !== null) {
+            this.runtimeDrawCallSamples.push(runtimeDrawCalls);
+        }
+    }
+
+    finishMeasurement() {
+        const fpsStats = this.calculateStats(this.fpsSamples);
+        const frameTimeStats = this.calculateStats(this.frameTimeSamples);
+        const drawCallStats = this.calculateStats(this.runtimeDrawCallSamples);
+        const objectRenderMeshInstances = this.generator.countActiveMeshInstances();
+
+        const row = {
+            testName: `${this.testName}_${this.currentRun.objectCount}`,
+            mode: 'baseline',
+            objectCount: this.currentRun.objectCount,
+            meshVariantCount: 1,
+            materialVariantCount: 1,
+            repetition: this.currentRun.repetition,
+            warmupSeconds: this.warmupSeconds,
+            measureSeconds: this.measureSeconds,
+            avgFps: this.formatNumber(fpsStats.avg),
+            minFps: this.formatNumber(fpsStats.min),
+            maxFps: this.formatNumber(fpsStats.max),
+            avgFrameTimeMs: this.formatNumber(frameTimeStats.avg),
+            minFrameTimeMs: this.formatNumber(frameTimeStats.min),
+            maxFrameTimeMs: this.formatNumber(frameTimeStats.max),
+            runtimeDrawCallsAvg: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.avg) : 'n/a',
+            runtimeDrawCallsMin: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.min) : 'n/a',
+            runtimeDrawCallsMax: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.max) : 'n/a',
+            objectRenderMeshInstances: objectRenderMeshInstances,
+            browser: this.browser,
+            resolution: this.resolution,
+            deviceNotes: this.deviceNotes,
+            notes: drawCallStats.count > 0
+                ? 'Runtime draw calls read from app stats.'
+                : 'Runtime draw calls unavailable from app stats; use MiniStats screenshot and objectRenderMeshInstances.'
+        };
+
+        this.csvExporter.addRow(row);
+
+        console.log('[BASELINE BENCHMARK] Finished run:', row);
+
+        this.phase = 'between';
+        this.timer = 0;
+
+        // Give the browser one moment between tests.
+        setTimeout(() => {
+            this.startNextRun();
+        }, 250);
+    }
+
+    finishBenchmark() {
+        this.phase = 'done';
+
+        const csv = this.csvExporter.finish();
+
+        console.log('[BASELINE BENCHMARK] Benchmark finished.');
+        console.log('[BASELINE BENCHMARK] Copy/download the CSV and save it in Raw results/.');
+
+        return csv;
+    }
+
+    calculateStats(samples) {
+        if (!samples || !samples.length) {
+            return {
+                count: 0,
+                avg: 0,
+                min: 0,
+                max: 0
+            };
+        }
+
+        let sum = 0;
+        let min = Number.POSITIVE_INFINITY;
+        let max = Number.NEGATIVE_INFINITY;
+
+        for (const value of samples) {
+            sum += value;
+            min = Math.min(min, value);
+            max = Math.max(max, value);
+        }
+
+        return {
+            count: samples.length,
+            avg: sum / samples.length,
+            min,
+            max
+        };
+    }
+
+    readRuntimeDrawCalls() {
+        const stats = this.app.stats;
+
+        if (!stats) {
+            return null;
+        }
+
+        const candidates = [
+            stats.drawCalls,
+            stats.render?.drawCalls,
+            stats.render?.calls,
+            stats.frame?.drawCalls,
+            stats.graphics?.drawCalls,
+            stats.scene?.drawCalls
+        ];
+
+        for (const candidate of candidates) {
+            const value = this.extractNumber(candidate);
+
+            if (value !== null) {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    extractNumber(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+
+        if (!value || typeof value !== 'object') {
+            return null;
+        }
+
+        const possibleKeys = ['total', 'count', 'value', 'drawCalls', 'forward'];
+
+        for (const key of possibleKeys) {
+            if (typeof value[key] === 'number' && Number.isFinite(value[key])) {
+                return value[key];
+            }
+        }
+
+        return null;
+    }
+
+    formatNumber(value) {
+        if (!Number.isFinite(value)) {
+            return 'n/a';
+        }
+
+        return Number(value.toFixed(3));
+    }
+}
