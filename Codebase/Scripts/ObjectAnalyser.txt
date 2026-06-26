@@ -1,0 +1,335 @@
+import { Script, Entity, KEY_A } from 'playcanvas';
+
+export class ObjectAnalyser extends Script {
+
+    static scriptName = 'objectAnalyser';
+
+    /**
+     * Parent entity that contains the generated benchmark objects.
+     *
+     * @attribute
+     * @type {Entity}
+     */
+    spawnParent;
+
+    /**
+     * If true, the analyser ignores disabled entities and disabled render components.
+     *
+     * @attribute
+     * @type {boolean}
+     */
+    onlyEnabled = true;
+
+    /**
+     * If true, detailed group information is printed to the console.
+     *
+     * @attribute
+     * @type {boolean}
+     */
+    logDetails = true;
+
+    /**
+     * Maximum number of groups to print in detail.
+     *
+     * @attribute
+     * @type {number}
+     */
+    maxGroupsToLog = 10;
+
+    initialize() {
+        this.lastResult = null;
+
+        console.log('[RENDER ANALYSER] Press A to analyse current generated objects.');
+    }
+
+    update() {
+        if (this.app.keyboard && this.app.keyboard.wasPressed(KEY_A)) {
+            this.analyse();
+        }
+    }
+
+    analyse() {
+        const root = this.spawnParent || this.app.root;
+
+        const result = {
+            objectCount: 0,
+            renderComponentCount: 0,
+            meshInstanceCount: 0,
+            groupCount: 0,
+            instancingCandidateCount: 0,
+            batchingCandidateCount: 0,
+            groups: []
+        };
+
+        const groupMap = new Map();
+
+        this.traverse(root, entity => {
+            if (!this.shouldAnalyseEntity(entity)) {
+                return;
+            }
+
+            result.objectCount++;
+
+            const render = entity.render;
+
+            if (!render) {
+                return;
+            }
+
+            result.renderComponentCount++;
+
+            const meshInstances = render.meshInstances || [];
+
+            for (let i = 0; i < meshInstances.length; i++) {
+                const meshInstance = meshInstances[i];
+
+                if (!meshInstance) {
+                    continue;
+                }
+
+                result.meshInstanceCount++;
+
+                const data = this.extractMeshInstanceData(entity, render, meshInstance, i);
+                const groupKey = this.buildGroupKey(data);
+
+                let group = groupMap.get(groupKey);
+
+                if (!group) {
+                    group = this.createGroup(data, groupKey);
+                    groupMap.set(groupKey, group);
+                }
+
+                group.count++;
+                group.entities.push(entity);
+                group.meshInstances.push(meshInstance);
+            }
+        });
+
+        result.groups = [...groupMap.values()];
+        result.groupCount = result.groups.length;
+
+        for (const group of result.groups) {
+            group.canInstance = this.canUseInstancing(group);
+            group.canBatch = this.canUseBatching(group);
+
+            if (group.canInstance) {
+                result.instancingCandidateCount++;
+            }
+
+            if (group.canBatch) {
+                result.batchingCandidateCount++;
+            }
+        }
+
+        this.lastResult = result;
+
+        if (this.logDetails) {
+            this.logResult(result);
+        }
+
+        return result;
+    }
+
+    shouldAnalyseEntity(entity) {
+        if (!entity) {
+            return false;
+        }
+
+        if (this.onlyEnabled && !entity.enabled) {
+            return false;
+        }
+
+        if (!entity.render) {
+            return false;
+        }
+
+        if (this.onlyEnabled && !entity.render.enabled) {
+            return false;
+        }
+
+        return true;
+    }
+
+    extractMeshInstanceData(entity, render, meshInstance, meshInstanceIndex) {
+        const material = meshInstance.material || render.material || null;
+        const mesh = meshInstance.mesh || null;
+
+        return {
+            entity,
+            render,
+            meshInstance,
+            meshInstanceIndex,
+
+            entityName: entity.name,
+            renderType: render.type || 'unknown',
+            renderAssetId: this.getAssetId(render.asset),
+            batchGroupId: this.getSafeValue(render.batchGroupId, -1),
+
+            meshId: this.getObjectIdentity(mesh, 'mesh'),
+            materialId: this.getObjectIdentity(material, 'material'),
+            materialName: material ? material.name : 'none',
+
+            layerKey: this.getLayerKey(render.layers),
+            castShadows: !!render.castShadows,
+            receiveShadows: !!render.receiveShadows,
+
+            isStatic: !!entity._staticBenchmarkObject
+        };
+    }
+
+    buildGroupKey(data) {
+        // Instancing needs strict compatibility: same mesh/render type, material, layer, and shadow state.
+        // Batching will later use a slightly looser compatibility check, but this strict key is useful first.
+        return [
+            `renderType:${data.renderType}`,
+            `renderAsset:${data.renderAssetId}`,
+            `mesh:${data.meshId}`,
+            `material:${data.materialId}`,
+            `layers:${data.layerKey}`,
+            `cast:${data.castShadows}`,
+            `receive:${data.receiveShadows}`
+        ].join('|');
+    }
+
+    createGroup(data, groupKey) {
+        return {
+            key: groupKey,
+
+            count: 0,
+            entities: [],
+            meshInstances: [],
+
+            renderType: data.renderType,
+            renderAssetId: data.renderAssetId,
+            meshId: data.meshId,
+            materialId: data.materialId,
+            materialName: data.materialName,
+            layerKey: data.layerKey,
+            batchGroupId: data.batchGroupId,
+            castShadows: data.castShadows,
+            receiveShadows: data.receiveShadows,
+
+            canInstance: false,
+            canBatch: false
+        };
+    }
+
+    canUseInstancing(group) {
+        // First prototype rule:
+        // Instancing candidate = at least 2 objects sharing the same mesh/material/layer/shadow state.
+        // Later we will add a threshold like 20 or 50.
+        return group.count >= 2 &&
+            group.meshId !== 'mesh:null' &&
+            group.materialId !== 'material:null';
+    }
+
+    canUseBatching(group) {
+        // First prototype rule:
+        // Batching candidate = at least 2 objects sharing a material/layer/shadow state.
+        // Later this will become stricter when we apply real batch groups.
+        return group.count >= 2 &&
+            group.materialId !== 'material:null';
+    }
+
+    getLayerKey(layers) {
+        if (!layers || !layers.length) {
+            return 'none';
+        }
+
+        return layers.join('_');
+    }
+
+    getAssetId(asset) {
+        if (!asset) {
+            return 'none';
+        }
+
+        if (typeof asset === 'number') {
+            return asset;
+        }
+
+        if (asset.id !== undefined) {
+            return asset.id;
+        }
+
+        return 'unknown';
+    }
+
+    getObjectIdentity(object, fallbackPrefix) {
+        if (!object) {
+            return `${fallbackPrefix}:null`;
+        }
+
+        if (object.id !== undefined) {
+            return `${fallbackPrefix}:${object.id}`;
+        }
+
+        if (object._id !== undefined) {
+            return `${fallbackPrefix}:${object._id}`;
+        }
+
+        if (object.name) {
+            return `${fallbackPrefix}:${object.name}`;
+        }
+
+        return `${fallbackPrefix}:object_${this.getFallbackObjectId(object)}`;
+    }
+
+    getFallbackObjectId(object) {
+        if (!object.__benchmarkAnalyserId) {
+            object.__benchmarkAnalyserId = Math.floor(Math.random() * 1000000000);
+        }
+
+        return object.__benchmarkAnalyserId;
+    }
+
+    getSafeValue(value, fallback) {
+        return value === undefined || value === null ? fallback : value;
+    }
+
+    traverse(entity, callback) {
+        if (!entity) {
+            return;
+        }
+
+        callback(entity);
+
+        for (let i = 0; i < entity.children.length; i++) {
+            this.traverse(entity.children[i], callback);
+        }
+    }
+
+    logResult(result) {
+        console.log('========== RENDER ANALYSER RESULT ==========');
+        console.log(`[RENDER ANALYSER] Objects analysed: ${result.objectCount}`);
+        console.log(`[RENDER ANALYSER] Render components analysed: ${result.renderComponentCount}`);
+        console.log(`[RENDER ANALYSER] Mesh instances analysed: ${result.meshInstanceCount}`);
+        console.log(`[RENDER ANALYSER] Groups found: ${result.groupCount}`);
+        console.log(`[RENDER ANALYSER] Instancing candidate groups: ${result.instancingCandidateCount}`);
+        console.log(`[RENDER ANALYSER] Batching candidate groups: ${result.batchingCandidateCount}`);
+
+        const groupsToLog = result.groups
+            .slice()
+            .sort((a, b) => b.count - a.count)
+            .slice(0, this.maxGroupsToLog);
+
+        for (let i = 0; i < groupsToLog.length; i++) {
+            const group = groupsToLog[i];
+
+            console.log(`----- Group ${i + 1} -----`);
+            console.log(`Count: ${group.count}`);
+            console.log(`Render type: ${group.renderType}`);
+            console.log(`Render asset: ${group.renderAssetId}`);
+            console.log(`Mesh: ${group.meshId}`);
+            console.log(`Material: ${group.materialName} (${group.materialId})`);
+            console.log(`Layers: ${group.layerKey}`);
+            console.log(`Batch group id: ${group.batchGroupId}`);
+            console.log(`Cast shadows: ${group.castShadows}`);
+            console.log(`Receive shadows: ${group.receiveShadows}`);
+            console.log(`Can instance: ${group.canInstance}`);
+            console.log(`Can batch: ${group.canBatch}`);
+        }
+
+        console.log('============================================');
+    }
+}
