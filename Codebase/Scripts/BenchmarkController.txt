@@ -1,0 +1,311 @@
+import { Script, Asset, Entity, Vec3 } from 'playcanvas';
+
+/** @enum {number} */
+const E_SPAWN_MODE = {
+    PRIMITIVE: 0,
+    ASSET: 1
+};
+
+export class BenchmarkSceneGenerator extends Script {
+    static scriptName = 'benchmarkSceneGenerator';
+
+    // Parent entity for the generated objects.
+    /**
+     * @attribute @type {Entity}
+     */
+    spawnParent;
+
+    // Materials used by the generated benchmark objects.
+    /**
+     * @attribute @type {Asset[]}
+     */
+    materialAssets;
+
+    // Render asset used for imported mesh tests.
+    /**
+     * @attribute @type {Asset}
+     */
+    renderAsset;
+
+    // Chooses between primitive objects and imported render assets.
+    /**
+     * @attribute @type {E_SPAWN_MODE}
+     */
+    spawnMode = E_SPAWN_MODE.PRIMITIVE;
+
+    /**
+     * @attribute @type {string}
+     */
+    primitiveType = 'box';
+
+    // Distance between generated objects.
+    /**
+     * @attribute @type {number}
+     */
+    spacing = 2.5;
+
+    // Y position used for all generated objects.
+    /**
+     * @attribute @type {number}
+     */
+    yPosition = 0;
+
+    // Scale used for all generated objects.
+    /**
+     * @attribute @type {Vec3}
+     */
+    objectScale = new Vec3(1, 1, 1);
+
+    // Enables shadow casting on generated objects.
+    /**
+     * @attribute @type {boolean}
+     */
+    castShadows = false;
+
+    // Enables shadow receiving on generated objects.
+    /**
+     * @attribute @type {boolean}
+     */
+    receiveShadows = false;
+
+    initialize() {
+        this.spawnedObjects = [];
+
+        // creating a parent automatically if none was assigned.
+        if (!this.spawnParent) {
+            this.spawnParent = new Entity('SpawnedObjects');
+            this.app.root.addChild(this.spawnParent);
+        }
+    }
+
+    // Generates a benchmark scene with the required object count.
+    generate(objectCount) {
+        this.clear();
+
+        const count = Math.max(0, Math.floor(objectCount));
+        const layout = this.calculateGridLayout(count);
+
+        // placing objects in a centered grid.
+        for (let i = 0; i < count; i++) {
+            const position = this.getGridPosition(i, layout);
+            const entity = this.createBenchmarkObject(i);
+
+            entity.setLocalPosition(position.x, this.yPosition, position.z);
+            entity.setLocalScale(this.objectScale);
+
+            this.spawnParent.addChild(entity);
+            this.spawnedObjects.push(entity);
+        }
+
+        const meshInstanceCount = this.countActiveMeshInstances();
+
+        console.log(`[SCENE GENERATOR] Spawned ${count} objects.`);
+        console.log(`[SCENE GENERATOR] Active render mesh instances: ${meshInstanceCount}.`);
+
+        return {
+            objectCount: count,
+            meshInstanceCount
+        };
+    }
+
+    // Clears all generated benchmark objects.
+    clear() {
+        // destroying objects tracked by this generator.
+        for (const entity of this.spawnedObjects) {
+            if (entity && !entity.destroyed) {
+                entity.destroy();
+            }
+        }
+
+        this.spawnedObjects.length = 0;
+
+        if (!this.spawnParent) {
+            return;
+        }
+
+        // clearing anything still left under the spawn parent.
+        const children = [...this.spawnParent.children];
+
+        for (const child of children) {
+            child.destroy();
+        }
+    }
+
+    // Calculates the grid layout for the object count.
+    calculateGridLayout(count) {
+        const columns = Math.ceil(Math.sqrt(count));
+        const rows = Math.ceil(count / columns);
+
+        return {
+            columns,
+            rows,
+            totalWidth: (columns - 1) * this.spacing,
+            totalDepth: (rows - 1) * this.spacing
+        };
+    }
+
+    // Gets the grid position for one object.
+    getGridPosition(index, layout) {
+        const column = index % layout.columns;
+        const row = Math.floor(index / layout.columns);
+
+        return {
+            x: column * this.spacing - layout.totalWidth * 0.5,
+            z: row * this.spacing - layout.totalDepth * 0.5
+        };
+    }
+
+    // Creates one benchmark object.
+    createBenchmarkObject(index) {
+        const entity = new Entity(`BenchmarkObject_${index}`);
+
+        if (this.spawnMode === E_SPAWN_MODE.ASSET) {
+            this.addRenderAssetComponent(entity, index);
+        } else {
+            this.addPrimitiveRenderComponent(entity, index);
+        }
+
+        // marking objects so other scripts can recognise generated benchmark objects.
+        entity.tags.add('benchmark-object');
+        entity._staticBenchmarkObject = true;
+
+        return entity;
+    }
+
+    // Adds a primitive render component.
+    addPrimitiveRenderComponent(entity, index) {
+        entity.addComponent('render', {
+            type: this.primitiveType
+        });
+
+        this.applyRenderSettings(entity);
+        this.applyMaterial(entity, index);
+    }
+
+    // Adds an imported render asset component.
+    addRenderAssetComponent(entity, index) {
+        if (!this.renderAsset) {
+            console.warn('[SCENE GENERATOR] No renderAsset assigned, fallback to box.');
+            this.addFallbackRenderComponent(entity, index);
+            return;
+        }
+
+        entity.addComponent('render', {
+            type: 'asset'
+        });
+
+        entity.render.asset = this.renderAsset;
+
+        this.applyRenderSettings(entity);
+        this.applyMaterial(entity, index);
+    }
+
+    // Adds a box render component when the asset is missing.
+    addFallbackRenderComponent(entity, index) {
+        entity.addComponent('render', {
+            type: 'box'
+        });
+
+        this.applyRenderSettings(entity);
+        this.applyMaterial(entity, index);
+    }
+
+    // Applies shared render settings.
+    applyRenderSettings(entity) {
+        if (!entity.render) {
+            return;
+        }
+
+        // keeping shadow settings the same for primitive and asset objects.
+        entity.render.castShadows = this.castShadows;
+        entity.render.receiveShadows = this.receiveShadows;
+    }
+
+    // Applies a material to a generated object.
+    applyMaterial(entity, index = 0) {
+        const materialAsset = this.getMaterialAssetForIndex(index);
+
+        if (!materialAsset || !materialAsset.resource || !entity.render) {
+            return;
+        }
+
+        const material = materialAsset.resource;
+
+        if (entity.render.type === 'asset') {
+            this.applyMaterialToAssetRender(entity, materialAsset, material);
+            return;
+        }
+
+        entity.render.material = material;
+    }
+
+    // Applies material data to an asset render component.
+    applyMaterialToAssetRender(entity, materialAsset, material) {
+        const meshInstances = entity.render.meshInstances || [];
+
+        // updating every mesh instance for imported meshes.
+        for (const meshInstance of meshInstances) {
+            meshInstance.material = material;
+        }
+
+        // keeping PlayCanvas material slots in sync.
+        const slotCount = Math.max(1, meshInstances.length);
+        entity.render.materialAssets = new Array(slotCount).fill(materialAsset);
+    }
+
+    // Gets the material asset for an object index.
+    getMaterialAssetForIndex(index) {
+        const validMaterials = this.getValidMaterialAssets();
+
+        if (!validMaterials.length) {
+            return null;
+        }
+
+        // cycling through materials to create material variants.
+        const materialIndex = index % validMaterials.length;
+        return validMaterials[materialIndex];
+    }
+
+    // Gets all usable material assets.
+    getValidMaterialAssets() {
+        if (!this.materialAssets || !this.materialAssets.length) {
+            return [];
+        }
+
+        // filtering out empty slots and unloaded material assets.
+        return this.materialAssets.filter(asset => asset && asset.resource);
+    }
+
+    // Counts active mesh instances under the spawn parent.
+    countActiveMeshInstances() {
+        let count = 0;
+
+        this.traverse(this.spawnParent, entity => {
+            if (!entity.enabled || !entity.render || !entity.render.enabled) {
+                return;
+            }
+
+            const meshInstances = entity.render.meshInstances;
+
+            if (meshInstances && meshInstances.length) {
+                count += meshInstances.length;
+            }
+        });
+
+        return count;
+    }
+
+    // Traverses an entity hierarchy.
+    traverse(entity, callback) {
+        if (!entity) {
+            return;
+        }
+
+        callback(entity);
+
+        // visiting children recursively.
+        for (const child of entity.children) {
+            this.traverse(child, callback);
+        }
+    }
+}

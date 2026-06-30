@@ -1,0 +1,254 @@
+import { Script, Entity, MeshInstance, VertexBuffer, VertexFormat } from 'playcanvas';
+
+export class InstancingOptimiser extends Script {
+    static scriptName = 'instancingOptimiser';
+
+    // Parent entity that contains the generated benchmark objects.
+    /**
+     * @attribute @type {Entity}
+     */
+    spawnParent;
+
+    // Minimum group size before GPU instancing is applied.
+    /**
+     * @attribute @type {number}
+     */
+    minimumGroupSize = 20;
+
+    // Disables the original render components after the instanced renderer is created.
+    /**
+     * @attribute @type {boolean}
+     */
+    disableSourceRenderers = true;
+
+    /**
+     * @attribute @type {boolean}
+     */
+    logDetails = true;
+
+    initialize() {
+        this.analyser = null;
+        this.instancedEntities = [];
+        this.instanceParent = null;
+        this.lastResult = null;
+    }
+
+    postInitialize() {
+        this.analyser = this.entity.script.objectAnalyser || null;
+
+        if (!this.analyser) {
+            console.warn('[INSTANCING OPTIMISER] ObjectAnalyser not found on the same entity.');
+        }
+    }
+
+    // Applies GPU instancing to compatible render groups.
+    apply(existingAnalysis = null) {
+        if (!this.validateSetup(existingAnalysis)) {
+            return null;
+        }
+
+        this.clearInstancing();
+
+        const analysis = existingAnalysis || this.analyser.analyse();
+
+        if (!analysis || !analysis.groups) {
+            console.error('[INSTANCING OPTIMISER] Invalid analyser result.');
+            return null;
+        }
+
+        let assignedObjectCount = 0;
+        let usedGroupCount = 0;
+        let skippedGroupCount = 0;
+        let createdInstanceGroups = 0;
+
+        // going through all analyser groups and creating instanced renderers where possible.
+        for (const group of analysis.groups) {
+            if (!this.shouldInstanceGroup(group)) {
+                skippedGroupCount++;
+                continue;
+            }
+
+            const sourceMeshInstance = this.getSourceMeshInstance(group);
+
+            if (!sourceMeshInstance) {
+                skippedGroupCount++;
+                continue;
+            }
+
+            const instancedEntity = this.createInstancedEntity(
+                group,
+                sourceMeshInstance,
+                createdInstanceGroups
+            );
+
+            if (!instancedEntity) {
+                skippedGroupCount++;
+                continue;
+            }
+
+            this.getInstanceParent().addChild(instancedEntity);
+            this.instancedEntities.push(instancedEntity);
+
+            // disabling the original renderers so the objects are not drawn twice.
+            if (this.disableSourceRenderers) {
+                this.disableSourceEntities(group.entities);
+            }
+
+            assignedObjectCount += group.entities.length;
+            usedGroupCount++;
+            createdInstanceGroups++;
+        }
+
+        this.lastResult = {
+            mode: 'instancing',
+            assignedObjectCount,
+            usedGroupCount,
+            skippedGroupCount,
+            createdInstanceGroups
+        };
+
+        if (this.logDetails) {
+            this.logResult(analysis, this.lastResult);
+        }
+
+        return this.lastResult;
+    }
+
+    // Checks if the optimiser can run.
+    validateSetup(existingAnalysis) {
+        if (!this.spawnParent) {
+            console.error('[INSTANCING OPTIMISER] Missing spawnParent.');
+            return false;
+        }
+
+        if (!this.analyser && !existingAnalysis) {
+            console.error('[INSTANCING OPTIMISER] Missing ObjectAnalyser.');
+            return false;
+        }
+
+        return true;
+    }
+
+    // Checks if a group should use GPU instancing.
+    shouldInstanceGroup(group) {
+        if (!group || !group.entities) {
+            return false;
+        }
+
+        return group.count >= this.minimumGroupSize;
+    }
+
+    // Creates one instanced render entity.
+    createInstancedEntity(group, sourceMeshInstance, groupIndex) {
+        const instanceCount = group.entities.length;
+        const matrices = this.buildMatrixBuffer(group.entities);
+
+        // creating the per-instance transform buffer.
+        const vertexFormat = VertexFormat.getDefaultInstancingFormat(this.app.graphicsDevice);
+        const vertexBuffer = new VertexBuffer(this.app.graphicsDevice, vertexFormat, instanceCount, {
+            data: matrices
+        });
+
+        const instancedEntity = new Entity(`InstancedGroup_${groupIndex}`);
+        const instancedMeshInstance = new MeshInstance(
+            sourceMeshInstance.mesh,
+            sourceMeshInstance.material
+        );
+
+        // assigning the instance buffer to the mesh instance.
+        instancedMeshInstance.setInstancing(vertexBuffer);
+        instancedMeshInstance.instancingCount = instanceCount;
+
+        instancedEntity.addComponent('render', {
+            meshInstances: [instancedMeshInstance]
+        });
+
+        return instancedEntity;
+    }
+
+    // Gets the first usable source mesh instance from a group.
+    getSourceMeshInstance(group) {
+        for (const entity of group.entities) {
+            if (!entity || !entity.render || !entity.render.meshInstances) {
+                continue;
+            }
+
+            const meshInstances = entity.render.meshInstances;
+
+            if (meshInstances.length > 0) {
+                return meshInstances[0];
+            }
+        }
+
+        return null;
+    }
+
+    // Builds the instance matrix buffer.
+    buildMatrixBuffer(entities) {
+        const matrices = new Float32Array(entities.length * 16);
+
+        // copying every entity world transform into the buffer.
+        for (let i = 0; i < entities.length; i++) {
+            const matrix = entities[i].getWorldTransform();
+            const data = matrix.data;
+
+            for (let m = 0; m < 16; m++) {
+                matrices[i * 16 + m] = data[m];
+            }
+        }
+
+        return matrices;
+    }
+
+    // Disables the original source render components.
+    disableSourceEntities(entities) {
+        for (const entity of entities) {
+            if (entity && entity.render) {
+                entity.render.enabled = false;
+            }
+        }
+    }
+
+    // Gets the parent used for instanced renderers.
+    getInstanceParent() {
+        if (this.instanceParent && !this.instanceParent.destroyed) {
+            return this.instanceParent;
+        }
+
+        // creating a separate parent to keep generated instanced renderers organised.
+        this.instanceParent = new Entity('InstancedObjects');
+        this.spawnParent.addChild(this.instanceParent);
+
+        return this.instanceParent;
+    }
+
+    // Clears generated instanced renderers.
+    clearInstancing() {
+        // destroying previously created instanced entities.
+        for (const entity of this.instancedEntities) {
+            if (entity && !entity.destroyed) {
+                entity.destroy();
+            }
+        }
+
+        this.instancedEntities.length = 0;
+
+        // destroying the parent as well so the hierarchy stays clean.
+        if (this.instanceParent && !this.instanceParent.destroyed) {
+            this.instanceParent.destroy();
+        }
+
+        this.instanceParent = null;
+    }
+
+    // Logs the instancing result.
+    logResult(analysis, result) {
+        console.log('========== INSTANCING OPTIMISER RESULT ==========');
+        console.log(`[INSTANCING OPTIMISER] Analyser groups: ${analysis.groupCount}`);
+        console.log(`[INSTANCING OPTIMISER] Instance groups created: ${result.createdInstanceGroups}`);
+        console.log(`[INSTANCING OPTIMISER] Groups used for instancing: ${result.usedGroupCount}`);
+        console.log(`[INSTANCING OPTIMISER] Groups skipped: ${result.skippedGroupCount}`);
+        console.log(`[INSTANCING OPTIMISER] Source objects assigned: ${result.assignedObjectCount}`);
+        console.log('=================================================');
+    }
+}

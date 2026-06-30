@@ -1,0 +1,302 @@
+import { Script, Entity } from 'playcanvas';
+
+const INVALID_BATCH_GROUP_ID = -1;
+const DEFAULT_BATCH_GROUP_AABB_SIZE = 10000;
+
+export class BatchingOptimiser extends Script {
+    static scriptName = 'batchingOptimiser';
+
+    // Parent entity containing the generated benchmark objects.
+    /** @attribute @type {Entity}*/
+    spawnParent;
+
+    // Batch group name created in the settings.
+    /** @attribute @type {string}*/
+    batchGroupName = 'Static Batch';
+
+    // Fallback batch group ID if the group cant be found by name.
+    /** @attribute @type {number}*/
+    batchGroupId = 100000;
+
+    // Minimum amount of compatible objects needed before batching is applied.
+    /** @attribute @type {number}*/
+    minimumGroupSize = 20;
+
+    /** @attribute @type {boolean}*/
+    logDetails = true;
+
+    initialize() {
+        this.analyser = null;
+        this.lastResult = null;
+    }
+
+    // Finds the analyser after all scripts are initialized.
+    postInitialize() {
+        this.analyser = this.entity.script.objectAnalyser || null;
+
+        if (!this.analyser) {
+            console.warn('[BATCHING OPTIMISER] ObjectAnalyser not found on the same entity.');
+        }
+    }
+
+    // Applies static batching to compatible render groups.
+    apply() {
+        if (!this.validateSetup()) {
+            return null;
+        }
+
+        // resolving the batch group before assigning objects.
+        const batchGroupId = this.resolveBatchGroupId();
+
+        if (!this.isValidBatchGroupId(batchGroupId)) {
+            console.error('[BATCHING OPTIMISER] No valid batch group ID found.');
+            return null;
+        }
+
+        // analysing the generated scene objects.
+        const analysis = this.analyser.analyse();
+        const groups = analysis.groups || [];
+
+        let assignedObjectCount = 0;
+        let usedGroupCount = 0;
+        let skippedGroupCount = 0;
+
+        // batching only groups that are large enough and compatible.
+        for (const group of groups) {
+            if (!this.shouldBatchGroup(group)) {
+                skippedGroupCount++;
+                continue;
+            }
+
+            usedGroupCount++;
+            assignedObjectCount += this.assignGroupToBatch(group, batchGroupId);
+        }
+
+        // rebuilding the batch group after assigning objects.
+        this.rebuildBatchGroup(batchGroupId);
+
+        // storing the result for benchmark logging.
+        this.lastResult = {
+            mode: 'batching',
+            batchGroupId,
+            analysedObjectCount: analysis.objectCount,
+            analysedMeshInstanceCount: analysis.meshInstanceCount,
+            analysedGroupCount: analysis.groupCount,
+            usedGroupCount,
+            skippedGroupCount,
+            assignedObjectCount
+        };
+
+        if (this.logDetails) {
+            this.logResult(this.lastResult);
+        }
+
+        return this.lastResult;
+    }
+
+    // Clears static batching from generated objects.
+    clearBatching() {
+        if (!this.spawnParent) {
+            return;
+        }
+
+        // removing batch settings from every generated render object.
+        this.traverse(this.spawnParent, entity => {
+            if (!entity.render) {
+                return;
+            }
+
+            entity.render.batchGroupId = INVALID_BATCH_GROUP_ID;
+            entity.render.isStatic = false;
+        });
+
+        // rebuilding the batch group after clearing objects.
+        const batchGroupId = this.resolveBatchGroupId();
+
+        if (this.isValidBatchGroupId(batchGroupId)) {
+            this.rebuildBatchGroup(batchGroupId);
+        }
+
+        console.log('[BATCHING OPTIMISER] Cleared batching from generated objects.');
+    }
+
+    validateSetup() {
+        if (!this.spawnParent) {
+            console.error('[BATCHING OPTIMISER] Missing spawnParent.');
+            return false;
+        }
+
+        if (!this.analyser) {
+            console.error('[BATCHING OPTIMISER] Missing ObjectAnalyser.');
+            return false;
+        }
+
+        return true;
+    }
+
+    // Checks if a batch group ID is usable.
+    isValidBatchGroupId(batchGroupId) {
+        return batchGroupId !== null && batchGroupId !== undefined && batchGroupId >= 0;
+    }
+
+    // Checks if an analyser group should be batched.
+    shouldBatchGroup(group) {
+        return group && group.canBatch && group.count >= this.minimumGroupSize;
+    }
+
+    // Assigns one analyser group to the selected batch group.
+    assignGroupToBatch(group, batchGroupId) {
+        let assignedCount = 0;
+
+        // assigning every render entity in the group.
+        for (const entity of group.entities) {
+            if (!entity || !entity.render) {
+                continue;
+            }
+
+            entity.render.batchGroupId = batchGroupId;
+            entity.render.isStatic = true;
+
+            assignedCount++;
+        }
+
+        return assignedCount;
+    }
+
+    // Resolves the batch group Id from name, fallback Id, or runtime creation.
+    resolveBatchGroupId() {
+        const batcher = this.app.batcher;
+
+        if (!batcher) {
+            console.error('[BATCHING OPTIMISER] app.batcher is not available.');
+            return null;
+        }
+
+        // searching by name.
+        const groupByName = this.getBatchGroupByName(batcher);
+
+        if (groupByName) {
+            return groupByName.id;
+        }
+
+        // searching by batch group Id.
+        const groupById = this.getBatchGroupById(batcher);
+
+        if (groupById) {
+            return groupById.id;
+        }
+
+        console.warn(
+            `[BATCHING OPTIMISER] Could not find batch group "${this.batchGroupName}". ` +
+            'Trying to create it at runtime.'
+        );
+
+        return this.createBatchGroupAtRuntime();
+    }
+
+    // Gets a batch group by name.
+    getBatchGroupByName(batcher) {
+        if (!this.batchGroupName || !batcher.getGroupByName) {
+            return null;
+        }
+
+        return batcher.getGroupByName(this.batchGroupName);
+    }
+
+    // Gets a batch group by fallback Id.
+    getBatchGroupById(batcher) {
+        if (!this.isValidBatchGroupId(this.batchGroupId) || !batcher.getGroupById) {
+            return null;
+        }
+
+        return batcher.getGroupById(this.batchGroupId);
+    }
+
+    // Creates a batch group at runtime.
+    createBatchGroupAtRuntime() {
+        const batcher = this.app.batcher;
+
+        if (!batcher || !batcher.addGroup) {
+            console.error('[BATCHING OPTIMISER] Cannot create batch group. batcher.addGroup is unavailable.');
+            return null;
+        }
+
+        // creating a static batch group for generated benchmark objects.
+        const group = batcher.addGroup(
+            this.batchGroupName,
+            false,
+            DEFAULT_BATCH_GROUP_AABB_SIZE,
+            this.batchGroupId
+        );
+
+        if (!group) {
+            console.error('[BATCHING OPTIMISER] Runtime batch group creation failed.');
+            return null;
+        }
+
+        console.log(`[BATCHING OPTIMISER] Created runtime batch group "${this.batchGroupName}" with ID ${group.id}.`);
+
+        return group.id;
+    }
+
+    // Rebuilds the batch group.
+    rebuildBatchGroup(batchGroupId) {
+        const batcher = this.app.batcher;
+
+        if (!batcher) {
+            console.error('[BATCHING OPTIMISER] Cannot rebuild batch group. app.batcher missing.');
+            return;
+        }
+
+        // rebuilding immediately when the batcher supports direct generation.
+        if (batcher.generate) {
+            batcher.generate([batchGroupId]);
+
+            if (this.logDetails) {
+                console.log(`[BATCHING OPTIMISER] Rebuilt batch group ${batchGroupId}.`);
+            }
+
+            return;
+        }
+
+        // marking dirty when direct generation is not possible.
+        if (batcher.markGroupDirty) {
+            batcher.markGroupDirty(batchGroupId);
+
+            if (this.logDetails) {
+                console.log(`[BATCHING OPTIMISER] Marked batch group ${batchGroupId} dirty.`);
+            }
+
+            return;
+        }
+
+        console.warn('[BATCHING OPTIMISER] No known rebatch method found.');
+    }
+
+    // Traverses an entity hierarchy.
+    traverse(entity, callback) {
+        if (!entity) {
+            return;
+        }
+
+        callback(entity);
+
+        // visiting children recursively.
+        for (const child of entity.children) {
+            this.traverse(child, callback);
+        }
+    }
+
+    // Logs the batching result.
+    logResult(result) {
+        console.log('========== BATCHING OPTIMISER RESULT ==========');
+        console.log(`[BATCHING OPTIMISER] Batch group ID: ${result.batchGroupId}`);
+        console.log(`[BATCHING OPTIMISER] Analysed objects: ${result.analysedObjectCount}`);
+        console.log(`[BATCHING OPTIMISER] Analysed mesh instances: ${result.analysedMeshInstanceCount}`);
+        console.log(`[BATCHING OPTIMISER] Analyser groups: ${result.analysedGroupCount}`);
+        console.log(`[BATCHING OPTIMISER] Groups used for batching: ${result.usedGroupCount}`);
+        console.log(`[BATCHING OPTIMISER] Groups skipped: ${result.skippedGroupCount}`);
+        console.log(`[BATCHING OPTIMISER] Objects assigned to batch group: ${result.assignedObjectCount}`);
+        console.log('===============================================');
+    }
+}

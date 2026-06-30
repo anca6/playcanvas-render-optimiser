@@ -4,23 +4,17 @@ export class CsvExporter extends Script {
     static scriptName = 'csvExporter';
 
     /**
-     * logs the final CSV to the browser console when all tests finish
-     * @attribute
-     * @type {boolean}
+     * @attribute @type {boolean}
      */
     logWhenDone = true;
 
     /**
-     * downloads the CSV file when all tests finish
-     * @attribute
-     * @type {boolean}
+     * @attribute @type {boolean}
      */
     downloadWhenDone = true;
 
     /**
-     * name of the downloaded CSV file
-     * @attribute
-     * @type {string}
+     * @attribute @type {string}
      */
     fileName = 'baseline_results.csv';
 
@@ -29,6 +23,7 @@ export class CsvExporter extends Script {
         this.rows = [];
     }
 
+    // Starts a new CSV export.
     startNew(headers) {
         this.headers = headers || [];
         this.rows = [];
@@ -40,14 +35,18 @@ export class CsvExporter extends Script {
         }
 
         this.rows.push(row);
+
         console.log('[CSV EXPORTER] Added row:', row);
     }
 
+    // Builds the CSV text.
     buildCsv() {
         const lines = [];
 
+        // adding the header row first.
         lines.push(this.headers.map(value => this.escapeCsv(value)).join(','));
 
+        // adding every data row under the headers.
         for (const row of this.rows) {
             const line = this.headers
                 .map(header => this.escapeCsv(row[header]))
@@ -59,6 +58,7 @@ export class CsvExporter extends Script {
         return lines.join('\n');
     }
 
+    // Finishes the CSV export.
     finish() {
         const csv = this.buildCsv();
 
@@ -89,6 +89,7 @@ export class CsvExporter extends Script {
         return text;
     }
 
+    // Downloads the CSV file.
     downloadCsv(csv, fileName) {
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);

@@ -1,99 +1,154 @@
 import { Script, KEY_B } from 'playcanvas';
 
+/** @enum {number} */
+const E_BENCHMARK_MODE = {
+    BASELINE: 0,
+    BATCHING: 1,
+    INSTANCING: 2
+};
+
+// Baseline CSV headers.
+// const BENCHMARK_HEADERS = [
+//     'testName',
+//     'mode',
+//     'objectCount',
+//     'meshVariantCount',
+//     'materialVariantCount',
+//     'repetition',
+//     'warmupSeconds',
+//     'measureSeconds',
+//     'avgFps',
+//     'minFps',
+//     'maxFps',
+//     'avgFrameTimeMs',
+//     'minFrameTimeMs',
+//     'maxFrameTimeMs',
+//     'runtimeDrawCallsAvg',
+//     'runtimeDrawCallsMin',
+//     'runtimeDrawCallsMax',
+//     'objectRenderMeshInstances',
+//     'browser',
+//     'resolution',
+//     'deviceNotes',
+//     'notes'
+// ];
+
+// Analyser-only CSV headers.
+// const BENCHMARK_HEADERS = [
+//     'testName',
+//     'mode',
+//     'objectCount',
+//     'repetition',
+//     'analysedObjectCount',
+//     'analysedRenderComponentCount',
+//     'analysedMeshInstanceCount',
+//     'analysedGroupCount',
+//     'analysedInstancingCandidateGroups',
+//     'analysedBatchingCandidateGroups',
+//     'analysedLargestGroupSize'
+// ];
+
+// Batching and GPU instancing CSV headers.
 const BENCHMARK_HEADERS = [
+    // Test setup
     'testName',
     'mode',
     'objectCount',
-    'meshVariantCount',
-    'materialVariantCount',
     'repetition',
-    'warmupSeconds',
-    'measureSeconds',
+
+    // Performance result
     'avgFps',
-    'minFps',
-    'maxFps',
     'avgFrameTimeMs',
-    'minFrameTimeMs',
-    'maxFrameTimeMs',
     'runtimeDrawCallsAvg',
-    'runtimeDrawCallsMin',
-    'runtimeDrawCallsMax',
     'objectRenderMeshInstances',
-    'browser',
-    'resolution',
-    'deviceNotes',
-    'notes'
+
+    // Analyser result
+    'analysedGroupCount',
+    'analysedBatchingCandidateGroups',
+    'analysedLargestGroupSize',
+
+    // Optimisation result
+    'optimisedAssignedObjectCount',
+    'optimisedUsedGroupCount',
+    'optimisedSkippedGroupCount'
 ];
 
 export class BaselineBenchmarkRunner extends Script {
     static scriptName = 'baselineBenchmarkRunner';
 
+    // Benchmark mode.
+    // BASELINE = no optimisation.
+    // BATCHING = applies batching after generation.
+    // INSTANCING = applies GPU instancing after generation.
     /**
-     * @attribute
-     * @type {string}
+     * @attribute @type {E_BENCHMARK_MODE}
+     */
+    benchmarkMode = E_BENCHMARK_MODE.BASELINE;
+
+    /**
+     * @attribute @type {string}
      */
     testName = 'baseline_cube';
 
+    // Object counts used for the benchmark.
     /**
-     * @attribute
-     * @type {string}
+     * @attribute @type {string}
      */
-    objectCounts = '100,250,500,1000';
+    objectCounts = '1000,2000,3000,4000,5000,6000,7000,8000,9000,10000';
 
+    // Number of times each object count is tested.
     /**
-     * @attribute
-     * @type {number}
+     * @attribute @type {number}
      */
     repetitions = 3;
 
+    // Warm-up time before measurement starts.
     /**
-     * Warm-up time before measurement starts.
-     * @attribute
-     * @type {number}
+     * @attribute @type {number}
      */
     warmupSeconds = 3;
 
+    // Measurement duration per run.
     /**
-     * Measurement duration per run.
-     * @attribute
-     * @type {number}
+     * @attribute @type {number}
      */
     measureSeconds = 10;
 
+    // Starts the benchmark automatically after the delay.
     /**
-     * If enabled, benchmark starts automatically after startDelaySeconds.
-     * @attribute
-     * @type {boolean}
+     * @attribute @type {boolean}
      */
     autoStart = false;
 
+    // Delay before auto-starting the benchmark.
     /**
-     * Delay before auto-starting the benchmark.
-     * @attribute
-     * @type {number}
+     * @attribute @type {number}
      */
     startDelaySeconds = 1;
 
+    // Browser used for the test.
     /**
-     * Browser used for the test.
-     * @attribute
-     * @type {string}
+     * @attribute @type {string}
      */
     browser = 'Chrome';
 
+    // Resolution used for the test.
     /**
-     * Resolution used for the test.
-     * @attribute
-     * @type {string}
+     * @attribute @type {string}
      */
     resolution = '1920x1080';
 
     initialize() {
         this.generator = null;
         this.csvExporter = null;
+        this.analyser = null;
+        this.batchingOptimiser = null;
+        this.instancingOptimiser = null;
 
         this.queue = [];
         this.currentRun = null;
+        this.currentAnalysis = null;
+        this.currentOptimisationResult = null;
 
         this.phase = 'idle';
         this.timer = 0;
@@ -110,17 +165,14 @@ export class BaselineBenchmarkRunner extends Script {
     postInitialize() {
         this.generator = this.entity.script.benchmarkSceneGenerator;
         this.csvExporter = this.entity.script.csvExporter;
-
-        if (!this.generator) {
-            console.error('[BASELINE BENCHMARK] Missing BenchmarkSceneGenerator on the same entity.');
-        }
-
-        if (!this.csvExporter) {
-            console.error('[BASELINE BENCHMARK] Missing CsvExporter on the same entity.');
-        }
+        this.analyser = this.entity.script.objectAnalyser || null;
+        this.batchingOptimiser = this.entity.script.batchingOptimiser || null;
+        this.instancingOptimiser = this.entity.script.instancingOptimiser || null;
     }
 
+    // Updates the benchmark flow.
     update(dt) {
+        // waiting before auto-starting the benchmark.
         if (this.autoStart && !this.hasAutoStarted) {
             this.autoStartTimer += dt;
 
@@ -130,6 +182,7 @@ export class BaselineBenchmarkRunner extends Script {
             }
         }
 
+        // starting the benchmark manually.
         if (this.app.keyboard && this.app.keyboard.wasPressed(KEY_B)) {
             this.startBenchmark();
         }
@@ -138,6 +191,7 @@ export class BaselineBenchmarkRunner extends Script {
             return;
         }
 
+        // waiting during the warm-up phase.
         if (this.phase === 'warmup') {
             this.timer += dt;
 
@@ -148,6 +202,7 @@ export class BaselineBenchmarkRunner extends Script {
             return;
         }
 
+        // collecting samples during the measurement phase.
         if (this.phase === 'measure') {
             this.timer += dt;
             this.collectSample(dt);
@@ -158,6 +213,7 @@ export class BaselineBenchmarkRunner extends Script {
         }
     }
 
+    // Starts the full benchmark queue.
     startBenchmark() {
         if (!this.generator || !this.csvExporter) {
             console.error('[BASELINE BENCHMARK] Cannot start. Missing generator or CSV exporter.');
@@ -173,6 +229,7 @@ export class BaselineBenchmarkRunner extends Script {
         this.startNextRun();
     }
 
+    // Builds the benchmark queue.
     buildQueue() {
         const counts = this.objectCounts
             .split(',')
@@ -181,6 +238,7 @@ export class BaselineBenchmarkRunner extends Script {
 
         const queue = [];
 
+        // creating one run for every object count and repetition.
         for (const objectCount of counts) {
             for (let repetition = 1; repetition <= this.repetitions; repetition++) {
                 queue.push({
@@ -193,6 +251,42 @@ export class BaselineBenchmarkRunner extends Script {
         return queue;
     }
 
+    // Batching implementation.
+    // startNextRun() {
+    //     if (!this.queue.length) {
+    //         this.finishBenchmark();
+    //         return;
+    //     }
+
+    //     this.currentRun = this.queue.shift();
+
+    //     console.log(
+    //         `[BASELINE BENCHMARK] Preparing ${this.currentRun.objectCount} objects, repetition ${this.currentRun.repetition}.`
+    //     );
+
+    //     this.generator.generate(this.currentRun.objectCount);
+    //     let optimisationResult = null;
+
+    //     if (this.benchmarkMode === E_BENCHMARK_MODE.BATCHING) {
+    //         if (!this.batchingOptimiser) {
+    //             console.error('[BASELINE BENCHMARK] Cannot apply batching. Missing BatchingOptimiser.');
+    //         } else {
+    //             optimisationResult = this.batchingOptimiser.apply();
+    //         }
+    //     }
+
+    //     this.currentOptimisationResult = optimisationResult;
+    //     this.currentAnalysis = this.analyser ? this.analyser.analyse() : null;
+
+    //     this.phase = 'warmup';
+    //     this.timer = 0;
+
+    //     this.fpsSamples.length = 0;
+    //     this.frameTimeSamples.length = 0;
+    //     this.runtimeDrawCallSamples.length = 0;
+    // }
+
+    // Starts the next benchmark run.
     startNextRun() {
         if (!this.queue.length) {
             this.finishBenchmark();
@@ -207,6 +301,30 @@ export class BaselineBenchmarkRunner extends Script {
 
         this.generator.generate(this.currentRun.objectCount);
 
+        // analysing the generated objects before applying optimisation.
+        this.currentAnalysis = this.analyser ? this.analyser.analyse() : null;
+
+        let optimisationResult = null;
+
+        // applying batching when batching mode is selected.
+        if (this.benchmarkMode === E_BENCHMARK_MODE.BATCHING) {
+            if (!this.batchingOptimiser) {
+                console.error('[BASELINE BENCHMARK] Cannot apply batching. Missing BatchingOptimiser.');
+            } else {
+                optimisationResult = this.batchingOptimiser.apply(this.currentAnalysis);
+            }
+        }
+
+        // applying GPU instancing when instancing mode is selected.
+        if (this.benchmarkMode === E_BENCHMARK_MODE.INSTANCING) {
+            if (!this.instancingOptimiser) {
+                console.error('[BASELINE BENCHMARK] Cannot apply instancing. Missing InstancingOptimiser.');
+            } else {
+                optimisationResult = this.instancingOptimiser.apply(this.currentAnalysis);
+            }
+        }
+
+        this.currentOptimisationResult = optimisationResult;
         this.phase = 'warmup';
         this.timer = 0;
 
@@ -215,6 +333,7 @@ export class BaselineBenchmarkRunner extends Script {
         this.runtimeDrawCallSamples.length = 0;
     }
 
+    // Starts measuring the current run.
     startMeasurement() {
         console.log(
             `[BASELINE BENCHMARK] Measuring ${this.currentRun.objectCount} objects, repetition ${this.currentRun.repetition}.`
@@ -228,6 +347,7 @@ export class BaselineBenchmarkRunner extends Script {
         this.runtimeDrawCallSamples.length = 0;
     }
 
+    // Collects one performance sample.
     collectSample(dt) {
         if (dt <= 0) {
             return;
@@ -240,42 +360,98 @@ export class BaselineBenchmarkRunner extends Script {
         this.fpsSamples.push(fps);
         this.frameTimeSamples.push(frameTimeMs);
 
+        // storing draw calls only when PlayCanvas exposes them.
         if (runtimeDrawCalls !== null) {
             this.runtimeDrawCallSamples.push(runtimeDrawCalls);
         }
     }
 
+    // Finishes the current measurement.
     finishMeasurement() {
         const fpsStats = this.calculateStats(this.fpsSamples);
         const frameTimeStats = this.calculateStats(this.frameTimeSamples);
         const drawCallStats = this.calculateStats(this.runtimeDrawCallSamples);
         const objectRenderMeshInstances = this.generator.countActiveMeshInstances();
 
+        const analysis = this.currentAnalysis;
+        const largestGroupSize = analysis && analysis.groups.length
+            ? Math.max(...analysis.groups.map(group => group.count))
+            : 0;
+
+        // Baseline row.
+        // const row = {
+        //     testName: `${this.testName}_${this.currentRun.objectCount}`,
+        //     mode: 'baseline',
+        //     objectCount: this.currentRun.objectCount,
+        //     meshVariantCount: 1,
+        //     materialVariantCount: 1,
+        //     repetition: this.currentRun.repetition,
+        //     warmupSeconds: this.warmupSeconds,
+        //     measureSeconds: this.measureSeconds,
+        //     avgFps: this.formatNumber(fpsStats.avg),
+        //     minFps: this.formatNumber(fpsStats.min),
+        //     maxFps: this.formatNumber(fpsStats.max),
+        //     avgFrameTimeMs: this.formatNumber(frameTimeStats.avg),
+        //     minFrameTimeMs: this.formatNumber(frameTimeStats.min),
+        //     maxFrameTimeMs: this.formatNumber(frameTimeStats.max),
+        //     runtimeDrawCallsAvg: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.avg) : 'n/a',
+        //     runtimeDrawCallsMin: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.min) : 'n/a',
+        //     runtimeDrawCallsMax: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.max) : 'n/a',
+        //     objectRenderMeshInstances: objectRenderMeshInstances,
+        //     browser: this.browser,
+        //     resolution: this.resolution,
+        //     deviceNotes: this.deviceNotes,
+        //     notes: drawCallStats.count > 0
+        //         ? 'Runtime draw calls read from app stats.'
+        //         : 'Runtime draw calls unavailable from app stats; use MiniStats screenshot and objectRenderMeshInstances.'
+        // };
+
+        // Analyser-only row.
+        // const row = {
+        //     testName: `${this.testName}_${this.currentRun.objectCount}`,
+        //     mode: 'analyser',
+        //     objectCount: this.currentRun.objectCount,
+        //     repetition: this.currentRun.repetition,
+        //     analysedObjectCount: analysis ? analysis.objectCount : 'n/a',
+        //     analysedRenderComponentCount: analysis ? analysis.renderComponentCount : 'n/a',
+        //     analysedMeshInstanceCount: analysis ? analysis.meshInstanceCount : 'n/a',
+        //     analysedGroupCount: analysis ? analysis.groupCount : 'n/a',
+        //     analysedInstancingCandidateGroups: analysis ? analysis.instancingCandidateCount : 'n/a',
+        //     analysedBatchingCandidateGroups: analysis ? analysis.batchingCandidateCount : 'n/a',
+        //     analysedLargestGroupSize: analysis ? largestGroupSize : 'n/a'
+        // };
+
+        // Batching and GPU instancing row.
         const row = {
+            // Test setup
             testName: `${this.testName}_${this.currentRun.objectCount}`,
-            mode: 'baseline',
+            mode: this.getModeName(),
             objectCount: this.currentRun.objectCount,
-            meshVariantCount: 1,
-            materialVariantCount: 1,
             repetition: this.currentRun.repetition,
-            warmupSeconds: this.warmupSeconds,
-            measureSeconds: this.measureSeconds,
+
+            // Performance result
             avgFps: this.formatNumber(fpsStats.avg),
-            minFps: this.formatNumber(fpsStats.min),
-            maxFps: this.formatNumber(fpsStats.max),
             avgFrameTimeMs: this.formatNumber(frameTimeStats.avg),
-            minFrameTimeMs: this.formatNumber(frameTimeStats.min),
-            maxFrameTimeMs: this.formatNumber(frameTimeStats.max),
             runtimeDrawCallsAvg: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.avg) : 'n/a',
-            runtimeDrawCallsMin: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.min) : 'n/a',
-            runtimeDrawCallsMax: drawCallStats.count > 0 ? this.formatNumber(drawCallStats.max) : 'n/a',
             objectRenderMeshInstances: objectRenderMeshInstances,
-            browser: this.browser,
-            resolution: this.resolution,
-            deviceNotes: this.deviceNotes,
-            notes: drawCallStats.count > 0
-                ? 'Runtime draw calls read from app stats.'
-                : 'Runtime draw calls unavailable from app stats; use MiniStats screenshot and objectRenderMeshInstances.'
+
+            // Analyser result
+            analysedGroupCount: analysis ? analysis.groupCount : 'n/a',
+            analysedBatchingCandidateGroups: analysis ? analysis.batchingCandidateCount : 'n/a',
+            analysedLargestGroupSize: analysis ? largestGroupSize : 'n/a',
+
+            // Optimisation result
+            optimisedAssignedObjectCount: this.currentOptimisationResult
+                ? this.currentOptimisationResult.assignedObjectCount
+                : 0,
+
+            optimisedUsedGroupCount: this.currentOptimisationResult
+                ? this.currentOptimisationResult.usedGroupCount
+                : 0,
+
+            optimisedSkippedGroupCount: this.currentOptimisationResult
+                ? this.currentOptimisationResult.skippedGroupCount
+                : 0
         };
 
         this.csvExporter.addRow(row);
@@ -285,12 +461,13 @@ export class BaselineBenchmarkRunner extends Script {
         this.phase = 'between';
         this.timer = 0;
 
-        // Give the browser one moment between tests.
+        // giving the browser one moment between tests.
         setTimeout(() => {
             this.startNextRun();
         }, 250);
     }
 
+    // Finishes the full benchmark.
     finishBenchmark() {
         this.phase = 'done';
 
@@ -302,6 +479,7 @@ export class BaselineBenchmarkRunner extends Script {
         return csv;
     }
 
+    // Calculates basic stats from samples.
     calculateStats(samples) {
         if (!samples || !samples.length) {
             return {
@@ -316,6 +494,7 @@ export class BaselineBenchmarkRunner extends Script {
         let min = Number.POSITIVE_INFINITY;
         let max = Number.NEGATIVE_INFINITY;
 
+        // calculating sum, minimum, and maximum
         for (const value of samples) {
             sum += value;
             min = Math.min(min, value);
@@ -330,6 +509,7 @@ export class BaselineBenchmarkRunner extends Script {
         };
     }
 
+    // Reads runtime draw calls from PlayCanvas stats.
     readRuntimeDrawCalls() {
         const stats = this.app.stats;
 
@@ -346,6 +526,7 @@ export class BaselineBenchmarkRunner extends Script {
             stats.scene?.drawCalls
         ];
 
+        // checking different possible stats paths because this can vary.
         for (const candidate of candidates) {
             const value = this.extractNumber(candidate);
 
@@ -357,6 +538,7 @@ export class BaselineBenchmarkRunner extends Script {
         return null;
     }
 
+    // Extracts a number from a stats value.
     extractNumber(value) {
         if (typeof value === 'number' && Number.isFinite(value)) {
             return value;
@@ -368,6 +550,7 @@ export class BaselineBenchmarkRunner extends Script {
 
         const possibleKeys = ['total', 'count', 'value', 'drawCalls', 'forward'];
 
+        // checking common keys used by stats objects.
         for (const key of possibleKeys) {
             if (typeof value[key] === 'number' && Number.isFinite(value[key])) {
                 return value[key];
@@ -377,11 +560,25 @@ export class BaselineBenchmarkRunner extends Script {
         return null;
     }
 
+    // Formats a number for CSV output.
     formatNumber(value) {
         if (!Number.isFinite(value)) {
             return 'n/a';
         }
 
         return Number(value.toFixed(3));
+    }
+
+    // Gets the current benchmark mode name.
+    getModeName() {
+        if (this.benchmarkMode === E_BENCHMARK_MODE.BATCHING) {
+            return 'batching';
+        }
+
+        if (this.benchmarkMode === E_BENCHMARK_MODE.INSTANCING) {
+            return 'instancing';
+        }
+
+        return 'baseline';
     }
 }

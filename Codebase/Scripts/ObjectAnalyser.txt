@@ -1,85 +1,71 @@
 import { Script, Entity, KEY_A } from 'playcanvas';
 
-export class ObjectAnalyser extends Script {
+const NULL_MESH_ID = 'mesh:null';
+const NULL_MATERIAL_ID = 'material:null';
 
+export class ObjectAnalyser extends Script {
     static scriptName = 'objectAnalyser';
 
+    // Parent entity that contains the generated benchmark objects.
     /**
-     * Parent entity that contains the generated benchmark objects.
-     *
-     * @attribute
-     * @type {Entity}
+     * @attribute @type {Entity}
      */
     spawnParent;
 
+    // Ignores disabled entities and disabled render components.
     /**
-     * If true, the analyser ignores disabled entities and disabled render components.
-     *
-     * @attribute
-     * @type {boolean}
+     * @attribute @type {boolean}
      */
     onlyEnabled = true;
 
     /**
-     * If true, detailed group information is printed to the console.
-     *
-     * @attribute
-     * @type {boolean}
+     * @attribute @type {boolean}
      */
     logDetails = true;
 
+    // Maximum amount of groups printed in detail.
     /**
-     * Maximum number of groups to print in detail.
-     *
-     * @attribute
-     * @type {number}
+     * @attribute @type {number}
      */
     maxGroupsToLog = 10;
 
     initialize() {
         this.lastResult = null;
 
-        console.log('[RENDER ANALYSER] Press A to analyse current generated objects.');
+        console.log('[RENDER ANALYSER] Press A to analyse generated objects.');
     }
 
+    // Checks for the analyse shortcut.
     update() {
-        if (this.app.keyboard && this.app.keyboard.wasPressed(KEY_A)) {
+        if (!this.app.keyboard) {
+            return;
+        }
+
+        // running the analyser manually.
+        if (this.app.keyboard.wasPressed(KEY_A)) {
             this.analyse();
         }
     }
 
+    // Analyses the generated render objects.
     analyse() {
         const root = this.spawnParent || this.app.root;
-
-        const result = {
-            objectCount: 0,
-            renderComponentCount: 0,
-            meshInstanceCount: 0,
-            groupCount: 0,
-            instancingCandidateCount: 0,
-            batchingCandidateCount: 0,
-            groups: []
-        };
-
+        const result = this.createEmptyResult();
         const groupMap = new Map();
 
+        // going through all entities under the root.
         this.traverse(root, entity => {
             if (!this.shouldAnalyseEntity(entity)) {
                 return;
             }
 
             result.objectCount++;
-
-            const render = entity.render;
-
-            if (!render) {
-                return;
-            }
-
             result.renderComponentCount++;
 
+            const render = entity.render;
             const meshInstances = render.meshInstances || [];
 
+            // grouping every mesh instance if they are compatible.
             for (let i = 0; i < meshInstances.length; i++) {
                 const meshInstance = meshInstances[i];
 
@@ -90,14 +76,7 @@ export class ObjectAnalyser extends Script {
                 result.meshInstanceCount++;
 
                 const data = this.extractMeshInstanceData(entity, render, meshInstance, i);
-                const groupKey = this.buildGroupKey(data);
-
-                let group = groupMap.get(groupKey);
-
-                if (!group) {
-                    group = this.createGroup(data, groupKey);
-                    groupMap.set(groupKey, group);
-                }
+                const group = this.getOrCreateGroup(groupMap, data);
 
                 group.count++;
                 group.entities.push(entity);
@@ -108,6 +87,7 @@ export class ObjectAnalyser extends Script {
         result.groups = [...groupMap.values()];
         result.groupCount = result.groups.length;
 
+        // checking which groups can be used for instancing or batching.
         for (const group of result.groups) {
             group.canInstance = this.canUseInstancing(group);
             group.canBatch = this.canUseBatching(group);
@@ -130,6 +110,20 @@ export class ObjectAnalyser extends Script {
         return result;
     }
 
+    // Creates the default result object.
+    createEmptyResult() {
+        return {
+            objectCount: 0,
+            renderComponentCount: 0,
+            meshInstanceCount: 0,
+            groupCount: 0,
+            instancingCandidateCount: 0,
+            batchingCandidateCount: 0,
+            groups: []
+        };
+    }
+
+    // Checks if an entity should be analysed.
     shouldAnalyseEntity(entity) {
         if (!entity) {
             return false;
@@ -150,6 +144,7 @@ export class ObjectAnalyser extends Script {
         return true;
     }
 
+    // Gets the data needed for grouping.
     extractMeshInstanceData(entity, render, meshInstance, meshInstanceIndex) {
         const material = meshInstance.material || render.material || null;
         const mesh = meshInstance.mesh || null;
@@ -177,9 +172,22 @@ export class ObjectAnalyser extends Script {
         };
     }
 
+    // Gets an existing group or creates a new one.
+    getOrCreateGroup(groupMap, data) {
+        const groupKey = this.buildGroupKey(data);
+        let group = groupMap.get(groupKey);
+
+        if (!group) {
+            group = this.createGroup(data, groupKey);
+            groupMap.set(groupKey, group);
+        }
+
+        return group;
+    }
+
+    // Builds the compatibility key for a group.
     buildGroupKey(data) {
-        // Instancing needs strict compatibility: same mesh/render type, material, layer, and shadow state.
-        // Batching will later use a slightly looser compatibility check, but this strict key is useful first.
+        // keeping the key strict because instancing needs matching mesh, material, layers, and shadow settings.
         return [
             `renderType:${data.renderType}`,
             `renderAsset:${data.renderAssetId}`,
@@ -191,6 +199,7 @@ export class ObjectAnalyser extends Script {
         ].join('|');
     }
 
+    // Creates a new analyser group.
     createGroup(data, groupKey) {
         return {
             key: groupKey,
@@ -214,23 +223,22 @@ export class ObjectAnalyser extends Script {
         };
     }
 
+    // Checks if a group can use GPU instancing.
     canUseInstancing(group) {
-        // First prototype rule:
-        // Instancing candidate = at least 2 objects sharing the same mesh/material/layer/shadow state.
-        // Later we will add a threshold like 20 or 50.
+        // requiring at least 2 matching objects with a valid mesh and material.
         return group.count >= 2 &&
-            group.meshId !== 'mesh:null' &&
-            group.materialId !== 'material:null';
+            group.meshId !== NULL_MESH_ID &&
+            group.materialId !== NULL_MATERIAL_ID;
     }
 
+    // Checks if a group can use batching.
     canUseBatching(group) {
-        // First prototype rule:
-        // Batching candidate = at least 2 objects sharing a material/layer/shadow state.
-        // Later this will become stricter when we apply real batch groups.
+        // requiring at least 2 matching objects with a valid material.
         return group.count >= 2 &&
-            group.materialId !== 'material:null';
+            group.materialId !== NULL_MATERIAL_ID;
     }
 
+    // Gets a readable layer key.
     getLayerKey(layers) {
         if (!layers || !layers.length) {
             return 'none';
@@ -239,6 +247,7 @@ export class ObjectAnalyser extends Script {
         return layers.join('_');
     }
 
+    // Gets an asset Id.
     getAssetId(asset) {
         if (!asset) {
             return 'none';
@@ -255,6 +264,7 @@ export class ObjectAnalyser extends Script {
         return 'unknown';
     }
 
+    // Gets a stable identity for a mesh/material.
     getObjectIdentity(object, fallbackPrefix) {
         if (!object) {
             return `${fallbackPrefix}:null`;
@@ -275,7 +285,9 @@ export class ObjectAnalyser extends Script {
         return `${fallbackPrefix}:object_${this.getFallbackObjectId(object)}`;
     }
 
+    // Gets a fallback Id for objects without normal Ids.
     getFallbackObjectId(object) {
+        // adding a simple analyser-only Id when PlayCanvas does not expose one.
         if (!object.__benchmarkAnalyserId) {
             object.__benchmarkAnalyserId = Math.floor(Math.random() * 1000000000);
         }
@@ -283,10 +295,12 @@ export class ObjectAnalyser extends Script {
         return object.__benchmarkAnalyserId;
     }
 
+    // Gets a value or fallback.
     getSafeValue(value, fallback) {
         return value === undefined || value === null ? fallback : value;
     }
 
+    // Traverses an entity hierarchy.
     traverse(entity, callback) {
         if (!entity) {
             return;
@@ -294,8 +308,9 @@ export class ObjectAnalyser extends Script {
 
         callback(entity);
 
-        for (let i = 0; i < entity.children.length; i++) {
-            this.traverse(entity.children[i], callback);
+        // visiting children recursively.
+        for (const child of entity.children) {
+            this.traverse(child, callback);
         }
     }
 
@@ -308,6 +323,7 @@ export class ObjectAnalyser extends Script {
         console.log(`[RENDER ANALYSER] Instancing candidate groups: ${result.instancingCandidateCount}`);
         console.log(`[RENDER ANALYSER] Batching candidate groups: ${result.batchingCandidateCount}`);
 
+        // sorting by biggest groups first because those matter most for optimisation.
         const groupsToLog = result.groups
             .slice()
             .sort((a, b) => b.count - a.count)

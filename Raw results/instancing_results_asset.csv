@@ -1,0 +1,4 @@
+testName,mode,objectCount,repetition,avgFps,avgFrameTimeMs,runtimeDrawCallsAvg,objectRenderMeshInstances,analysedGroupCount,analysedBatchingCandidateGroups,analysedLargestGroupSize,optimisedAssignedObjectCount,optimisedUsedGroupCount,optimisedSkippedGroupCount
+instancing_asset_10,instancing,10,1,59.768,16.89,21,20,2,2,10,0,0,2
+instancing_asset_10,instancing,10,2,60.005,16.666,21,20,2,2,10,0,0,2
+instancing_asset_10,instancing,10,3,59.956,16.693,21,20,2,2,10,0,0,2

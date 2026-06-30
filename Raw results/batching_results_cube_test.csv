@@ -1,0 +1,5 @@
+testName,mode,objectCount,repetition,avgFps,avgFrameTimeMs,runtimeDrawCallsAvg,objectRenderMeshInstances,analysedGroupCount,analysedBatchingCandidateGroups,analysedLargestGroupSize,optimisedAssignedObjectCount,optimisedUsedGroupCount,optimisedSkippedGroupCount
+batching_cube_test_1000,batching,1000,1,60.002,16.667,4,1000,3,3,334,1000,3,0
+batching_cube_test_5000,batching,5000,1,60.004,16.666,4,5000,3,3,1667,5000,3,0
+batching_cube_test_10000,batching,10000,1,60.008,16.665,4,10000,3,3,3334,10000,3,0
+batching_cube_test_15000,batching,15000,1,60.005,16.666,4,15000,3,3,5000,15000,3,0
